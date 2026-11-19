@@ -99,26 +99,41 @@ PluginComponent {
         const gen = ++epoch;
         loading = true;
         Quickshell.execDetached(["mkdir", "-p", cacheDir]);
-        // ponytail: token rides in curl argv (same-user /proc visible), swap for `sh -c` + env or --config when it matters
-        Proc.runCommand(null, ["curl", "-sS", "--connect-timeout", "5", "--max-time", "15",
-            "-H", "Authorization: Bearer " + token,
-            baseUrl + "/api/memos?pageSize=" + maxMemos], function(out, code) {
+        // pinned memos can be older than the recent window, so they need their own request
+        getJson(baseUrl + "/api/memos?pageSize=10&filter=" + encodeURIComponent("pinned"), function (pinCode, pins) {
             if (gen !== epoch)
                 return;
-            loading = false;
-            if (code !== 0) {
-                lastError = "Request failed (curl exit " + code + ")";
-                return;
-            }
-            try {
-                const data = JSON.parse(out);
-                const list = (data.memos || []).filter(m => m.state !== "ARCHIVED")
-                    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || String(b.createTime).localeCompare(String(a.createTime)));
+            getJson(baseUrl + "/api/memos?pageSize=" + maxMemos, function (code, data) {
+                if (gen !== epoch)
+                    return;
+                loading = false;
+                if (code !== 0 || !data) {
+                    lastError = "Request failed (curl exit " + code + ")";
+                    return;
+                }
+                const keep = arr => (arr || []).filter(m => m.state !== "ARCHIVED");
+                const byTime = (a, b) => String(b.createTime).localeCompare(String(a.createTime));
+                const pinned = keep(pinCode === 0 && pins ? pins.memos : []).sort(byTime);
+                const seen = {};
+                pinned.forEach(m => seen[m.name] = true);
+                const list = pinned.concat(keep(data.memos).filter(m => !seen[m.name]).sort(byTime));
                 memos = list;
                 lastError = "";
                 root.cacheImages(list);
+            });
+        });
+    }
+
+    // ponytail: token rides in curl argv (same-user /proc visible), swap for `sh -c` + env or --config when it matters
+    function getJson(url, cb) {
+        Proc.runCommand(null, ["curl", "-sS", "--connect-timeout", "5", "--max-time", "15",
+            "-H", "Authorization: Bearer " + token, url], function (out, code) {
+            if (code !== 0)
+                return cb(code, null);
+            try {
+                cb(0, JSON.parse(out));
             } catch (e) {
-                lastError = "Bad response from " + baseUrl;
+                cb(-1, null);
             }
         }, 0, 20000);
     }
