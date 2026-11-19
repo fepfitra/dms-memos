@@ -198,29 +198,24 @@ PluginComponent {
         }, 0, 5000);
     }
 
-    // image bytes go through a temp file: one argv element cannot hold a big base64 payload
+    // image bytes stay in a temp file: a single argv element cannot hold a big base64 payload (MAX_ARG_STRLEN 128k)
     function clipboardImage(mime) {
-        Proc.runCommand(null, ["sh", "-c", "wl-paste -t '" + mime + "' > " + clipTmp + ".img"], function (out, code) {
+        Proc.runCommand(null, ["sh", "-c", "wl-paste -t '" + mime + "' > " + clipTmp + ".img && sha1sum " + clipTmp + ".img"], function (out, code) {
             if (code !== 0)
                 return;
-            Proc.runCommand(null, ["sh", "-c", "base64 -w0 " + clipTmp + ".img"], function (b64, bcode) {
-                if (bcode !== 0 || String(b64).length < 100)
-                    return;
-                const sig = clipSig(String(b64));
-                if (sig === lastClipSig)
-                    return;
-                lastClipSig = sig;
-                askSave("New image copied", mime, () => root.createImageMemo(mime, String(b64)), clipTmp + ".img");
-            }, 0, 20000);
+            const sig = String(out).trim();
+            if (sig.length === 0 || sig === lastClipSig)
+                return;
+            lastClipSig = sig;
+            askSave("New image copied", mime, () => root.createImageMemo(mime), clipTmp + ".img");
         }, 0, 20000);
     }
 
-    function createImageMemo(mime, b64) {
+    function createImageMemo(mime) {
         const ext = (mime.split("/")[1] || "png").split("+")[0];
         const name = "clipboard-" + Date.now() + "." + ext;
-        const py = "import base64,json;open('" + clipTmp + ".json','w').write(json.dumps({'filename':'" + name
-            + "','type':'" + mime + "','content':'" + b64 + "'}))";
-        Proc.runCommand(null, ["sh", "-c", "python3 -c \"" + py + "\""], function (out, code) {
+        const py = "import base64,json,sys;open(sys.argv[2],'w').write(json.dumps({'filename':sys.argv[3],'type':sys.argv[4],'content':base64.b64encode(open(sys.argv[1],'rb').read()).decode()}))";
+        Proc.runCommand(null, ["python3", "-c", py, clipTmp + ".img", clipTmp + ".json", name, mime], function (out, code) {
             if (code !== 0) {
                 ToastService.showError("Memo not saved", "temp file write failed");
                 return;
@@ -240,8 +235,18 @@ PluginComponent {
                     ToastService.showError("Upload failed", String(res).substring(0, 80));
                     return;
                 }
-                const path = "/file/attachments/" + String(att.name).replace(/^attachments\//, "") + "/" + att.filename;
-                root.createMemo("![](" + path + ")");
+                // native shape: empty content + the attachment, which is what the Memos web UI produces
+                Proc.runCommand(null, ["curl", "-sS", "--max-time", "20", "-X", "POST",
+                    "-H", "Authorization: Bearer " + token, "-H", "Content-Type: application/json",
+                    "-d", JSON.stringify({ content: "", attachments: [{ name: att.name }] }),
+                    baseUrl + "/api/memos"], function (mout, mc) {
+                    if (mc !== 0) {
+                        ToastService.showError("Memo not saved", "curl exit " + mc);
+                        return;
+                    }
+                    ToastService.showInfo("Memo added");
+                    root.refresh();
+                }, 0, 25000);
             }, 0, 45000);
         }, 0, 10000);
     }
