@@ -18,7 +18,9 @@ PluginComponent {
 
     property var memos: []
     property bool loading: false
+    property bool loadingMore: false
     property string lastError: ""
+    property string nextToken: ""
     property int epoch: 0
 
     readonly property bool configured: baseUrl.length > 0 && token.length > 0
@@ -51,21 +53,24 @@ PluginComponent {
         return Qt.formatDate(new Date(t), "d MMM");
     }
 
-    function refresh() {
+    function fetchPage(pageToken, append) {
         if (!configured) {
             memos = [];
+            nextToken = "";
             lastError = "";
             return;
         }
         const gen = ++epoch;
-        loading = true;
+        loading = !append;
+        loadingMore = append;
         // ponytail: token rides in curl argv (same-user /proc visible), swap for `sh -c` + env or --config when it matters
         Proc.runCommand(null, ["curl", "-sS", "--connect-timeout", "5", "--max-time", "15",
             "-H", "Authorization: Bearer " + token,
-            baseUrl + "/api/memos?pageSize=" + maxMemos], function(out, code) {
+            baseUrl + "/api/memos?pageSize=" + maxMemos + (pageToken.length > 0 ? "&pageToken=" + pageToken : "")], function(out, code) {
             if (gen !== epoch)
                 return;
             loading = false;
+            loadingMore = false;
             if (code !== 0) {
                 lastError = "Request failed (curl exit " + code + ")";
                 return;
@@ -73,12 +78,23 @@ PluginComponent {
             try {
                 const data = JSON.parse(out);
                 const list = (data.memos || []).filter(m => m.state !== "ARCHIVED");
-                memos = list;
+                memos = append ? memos.concat(list) : list;
+                nextToken = String(data.nextPageToken || "");
                 lastError = "";
             } catch (e) {
                 lastError = "Bad response from " + baseUrl;
             }
         }, 0, 20000);
+    }
+
+    function refresh() {
+        fetchPage("", false);
+    }
+
+    function loadMore() {
+        if (!configured || loading || loadingMore || nextToken.length === 0)
+            return;
+        fetchPage(nextToken, true);
     }
 
     function copyMemo(memo) {
@@ -208,6 +224,43 @@ PluginComponent {
                     clip: true
                     spacing: Theme.spacingS
                     model: root.memos
+
+                    footer: StyledRect {
+                        width: list.width
+                        height: visible ? moreRow.implicitHeight + Theme.spacingM * 2 : 0
+                        visible: root.nextToken.length > 0 || root.loadingMore
+                        radius: Theme.cornerRadius
+                        color: moreArea.containsMouse && !root.loadingMore ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
+
+                        Row {
+                            id: moreRow
+                            anchors.centerIn: parent
+                            spacing: Theme.spacingXS
+
+                            DIcon {
+                                name: root.loadingMore ? "progress_activity" : "expand_more"
+                                size: Theme.fontSizeMedium
+                                color: Theme.primary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            StyledText {
+                                text: root.loadingMore ? "Loading…" : "Load " + root.maxMemos + " more"
+                                color: Theme.surfaceText
+                                font.pixelSize: Theme.fontSizeSmall
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+
+                        MouseArea {
+                            id: moreArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: !root.loadingMore
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.loadMore()
+                        }
+                    }
 
                     delegate: StyledRect {
                         required property var modelData
