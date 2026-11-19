@@ -18,9 +18,7 @@ PluginComponent {
 
     property var memos: []
     property bool loading: false
-    property bool loadingMore: false
     property string lastError: ""
-    property string nextToken: ""
     property int epoch: 0
 
     readonly property bool configured: baseUrl.length > 0 && token.length > 0
@@ -53,48 +51,76 @@ PluginComponent {
         return Qt.formatDate(new Date(t), "d MMM");
     }
 
-    function fetchPage(pageToken, append) {
+    // image attachments need an authed fetch, so curl them into a local cache and point Image at the file
+    property string cacheDir: "/tmp/dms-memos-cache"
+    property var imgPaths: ({})
+
+    function images(memo) {
+        const att = (memo && memo.attachments) ? memo.attachments : [];
+        return att.filter(a => String(a.type || "").indexOf("image/") === 0);
+    }
+
+    function docs(memo) {
+        const att = (memo && memo.attachments) ? memo.attachments : [];
+        return att.filter(a => String(a.type || "").indexOf("image/") !== 0);
+    }
+
+    function attachPath(a) {
+        const uid = String(a.name || "").replace(/^attachments\//, "").replace(/[^A-Za-z0-9]/g, "");
+        const fn = String(a.filename || "file").replace(/[^A-Za-z0-9._-]/g, "_");
+        return cacheDir + "/" + uid + "_" + fn;
+    }
+
+    function cacheImages(list) {
+        const wanted = [];
+        list.forEach(m => images(m).slice(0, 1).forEach(a => {
+            if (!imgPaths[a.name])
+                wanted.push(a);
+        }));
+        wanted.slice(0, 20).forEach(a => {
+            const p = attachPath(a);
+            const url = baseUrl + "/file/attachments/" + String(a.name).replace(/^attachments\//, "") + "/" + a.filename;
+            Proc.runCommand(null, ["curl", "-sS", "--max-time", "25", "-H", "Authorization: Bearer " + token, "-o", p, url], function(out, code) {
+                if (code !== 0)
+                    return;
+                const next = Object.assign({}, imgPaths);
+                next[a.name] = "file://" + p;
+                imgPaths = next;
+            }, 0, 30000);
+        });
+    }
+
+    function refresh() {
         if (!configured) {
             memos = [];
-            nextToken = "";
             lastError = "";
             return;
         }
         const gen = ++epoch;
-        loading = !append;
-        loadingMore = append;
+        loading = true;
+        Quickshell.execDetached(["mkdir", "-p", cacheDir]);
         // ponytail: token rides in curl argv (same-user /proc visible), swap for `sh -c` + env or --config when it matters
         Proc.runCommand(null, ["curl", "-sS", "--connect-timeout", "5", "--max-time", "15",
             "-H", "Authorization: Bearer " + token,
-            baseUrl + "/api/memos?pageSize=" + maxMemos + (pageToken.length > 0 ? "&pageToken=" + pageToken : "")], function(out, code) {
+            baseUrl + "/api/memos?pageSize=" + maxMemos], function(out, code) {
             if (gen !== epoch)
                 return;
             loading = false;
-            loadingMore = false;
             if (code !== 0) {
                 lastError = "Request failed (curl exit " + code + ")";
                 return;
             }
             try {
                 const data = JSON.parse(out);
-                const list = (data.memos || []).filter(m => m.state !== "ARCHIVED");
-                memos = append ? memos.concat(list) : list;
-                nextToken = String(data.nextPageToken || "");
+                const list = (data.memos || []).filter(m => m.state !== "ARCHIVED")
+                    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || String(b.createTime).localeCompare(String(a.createTime)));
+                memos = list;
                 lastError = "";
+                root.cacheImages(list);
             } catch (e) {
                 lastError = "Bad response from " + baseUrl;
             }
         }, 0, 20000);
-    }
-
-    function refresh() {
-        fetchPage("", false);
-    }
-
-    function loadMore() {
-        if (!configured || loading || loadingMore || nextToken.length === 0)
-            return;
-        fetchPage(nextToken, true);
     }
 
     function copyMemo(memo) {
@@ -225,43 +251,6 @@ PluginComponent {
                     spacing: Theme.spacingS
                     model: root.memos
 
-                    footer: StyledRect {
-                        width: list.width
-                        height: visible ? moreRow.implicitHeight + Theme.spacingM * 2 : 0
-                        visible: root.nextToken.length > 0 || root.loadingMore
-                        radius: Theme.cornerRadius
-                        color: moreArea.containsMouse && !root.loadingMore ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
-
-                        Row {
-                            id: moreRow
-                            anchors.centerIn: parent
-                            spacing: Theme.spacingXS
-
-                            DIcon {
-                                name: root.loadingMore ? "progress_activity" : "expand_more"
-                                size: Theme.fontSizeMedium
-                                color: Theme.primary
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-
-                            StyledText {
-                                text: root.loadingMore ? "Loading…" : "Load " + root.maxMemos + " more"
-                                color: Theme.surfaceText
-                                font.pixelSize: Theme.fontSizeSmall
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-                        }
-
-                        MouseArea {
-                            id: moreArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            enabled: !root.loadingMore
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.loadMore()
-                        }
-                    }
-
                     delegate: StyledRect {
                         required property var modelData
                         width: list.width
@@ -275,8 +264,60 @@ PluginComponent {
                             anchors.margins: Theme.spacingM
                             spacing: Theme.spacingXS
 
+                            Image {
+                                id: thumb
+                                readonly property var att: root.images(modelData)
+                                visible: att.length > 0
+                                width: parent.width - Theme.spacingL
+                                height: visible ? Math.min(200, width * 0.62) : 0
+                                source: visible ? (root.imgPaths[att[0].name] || "") : ""
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                cache: false
+                                sourceSize.width: Math.round(width)
+                                sourceSize.height: Math.round(height)
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: 4
+                                    visible: thumb.status !== Image.Ready
+                                    color: Theme.surfaceContainerHighest
+
+                                    DIcon {
+                                        anchors.centerIn: parent
+                                        name: "image"
+                                        size: Theme.iconSizeLarge
+                                        color: Theme.surfaceVariantText
+                                    }
+                                }
+                            }
+
+                            Row {
+                                readonly property var att: root.docs(modelData)
+                                visible: att.length > 0
+                                width: parent.width - Theme.spacingL
+                                spacing: Theme.spacingS
+
+                                DIcon {
+                                    name: root.docs(modelData).length > 0 && String(root.docs(modelData)[0].type).indexOf("pdf") >= 0 ? "picture_as_pdf" : "description"
+                                    size: Theme.fontSizeLarge
+                                    color: Theme.primary
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                StyledText {
+                                    width: parent.width - Theme.fontSizeLarge - Theme.spacingS
+                                    text: root.docs(modelData).map(a => a.filename).join("  ·  ")
+                                    color: Theme.surfaceText
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    elide: Text.ElideMiddle
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                            }
+
                             StyledText {
                                 width: parent.width - Theme.spacingL
+                                visible: text.length > 0 && root.images(modelData).length === 0
                                 text: root.snippet(modelData)
                                 color: Theme.surfaceText
                                 font.pixelSize: Theme.fontSizeSmall
