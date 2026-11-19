@@ -93,7 +93,7 @@ PluginComponent {
     function openMemo(memo) {
         if (!memo || !memo.name)
             return;
-        Quickshell.execDetached(["xdg-open", baseUrl + "/m/" + String(memo.name).replace(/^memos\//, "")]);
+        Quickshell.execDetached(["xdg-open", baseUrl + "/memos/" + String(memo.name).replace(/^memos\//, "")]);
         root.closePopout();
     }
 
