@@ -223,7 +223,7 @@ PluginComponent {
                             spacing: Theme.spacingXS
 
                             StyledText {
-                                width: parent.width
+                                width: parent.width - Theme.spacingL
                                 text: root.snippet(modelData)
                                 color: Theme.surfaceText
                                 font.pixelSize: Theme.fontSizeSmall
@@ -245,6 +245,25 @@ PluginComponent {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: root.copyMemo(modelData)
+                        }
+
+                        DIcon {
+                            id: openIcon
+                            name: "open_in_new"
+                            size: Theme.fontSizeMedium
+                            color: openArea.containsMouse ? Theme.primary : Theme.surfaceVariantText
+                            anchors.right: parent.right
+                            anchors.rightMargin: Theme.spacingS
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            MouseArea {
+                                id: openArea
+                                anchors.fill: parent
+                                anchors.margins: -Theme.spacingXS
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openMemo(modelData)
+                            }
                         }
                     }
                 }
