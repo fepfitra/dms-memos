@@ -138,6 +138,29 @@ PluginComponent {
         }, 0, 20000);
     }
 
+    property bool sending: false
+
+    function createMemo(text) {
+        const body = String(text || "").trim();
+        if (body.length === 0 || sending || !configured)
+            return;
+        sending = true;
+        Proc.runCommand(null, ["curl", "-sS", "--max-time", "15", "-X", "POST",
+            "-H", "Authorization: Bearer " + token,
+            "-H", "Content-Type: application/json",
+            "-d", JSON.stringify({ content: body }),
+            baseUrl + "/api/memos"], function (out, code) {
+            sending = false;
+            if (code !== 0) {
+                ToastService.showError("Memo not saved", "curl exit " + code);
+                return;
+            }
+            draftField.text = "";
+            ToastService.showInfo("Memo added");
+            root.refresh();
+        }, 0, 20000);
+    }
+
     function copyMemo(memo) {
         const text = snippet(memo);
         if (!text)
@@ -239,6 +262,26 @@ PluginComponent {
                 width: parent.width
                 height: root.popoutHeight - popout.headerHeight - popout.detailsHeight - Theme.spacingXL
 
+                Row {
+                    id: composeRow
+                    width: parent.width
+                    spacing: Theme.spacingS
+
+                    DTextField {
+                        id: draftField
+                        width: parent.width - addButton.width - Theme.spacingS
+                        placeholderText: "New memo…"
+                        onAccepted: root.createMemo(draftField.text)
+                    }
+
+                    DButton {
+                        id: addButton
+                        text: root.sending ? "…" : "Add"
+                        enabled: !root.sending && draftField.text.trim().length > 0 && root.configured
+                        onClicked: root.createMemo(draftField.text)
+                    }
+                }
+
                 StyledText {
                     anchors.centerIn: parent
                     width: parent.width - Theme.spacingL * 2
@@ -260,7 +303,11 @@ PluginComponent {
 
                 ListView {
                     id: list
-                    anchors.fill: parent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.top: composeRow.bottom
+                    anchors.topMargin: Theme.spacingS
                     visible: root.memos.length > 0
                     clip: true
                     spacing: Theme.spacingS
