@@ -1,0 +1,19 @@
+{
+    "id": "memosWidget",
+    "name": "Memos",
+    "description": "Read your Memos server from the bar: latest memo in the pill, recent memos in the popout",
+    "version": "0.1.0",
+    "license": "MIT",
+    "author": "Fitra Fep",
+    "icon": "sticky_note_2",
+    "type": "widget",
+    "category": "productivity",
+    "component": "./MemosWidget.qml",
+    "settings": "./MemosSettings.qml",
+    "capabilities": ["dankbar-widget"],
+    "requires_dms": ">=2.0.0",
+    "compositors": ["any"],
+    "distro": ["any"],
+    "dependencies": ["curl"],
+    "permissions": ["settings_read", "settings_write", "process", "network"]
+}
