@@ -15,6 +15,8 @@ PluginComponent {
     property int refreshMinutes: Math.max(1, parseInt(pluginData.refreshMinutes || "10", 10))
     property int maxMemos: Math.min(50, Math.max(1, parseInt(pluginData.maxMemos || "10", 10)))
     property bool showSnippet: pluginData.showSnippet ?? false
+    property bool clipboardPrompt: String(pluginData.clipboardPrompt) !== "false" && pluginData.clipboardPrompt !== false
+    property int clipboardMinChars: Math.max(1, parseInt(pluginData.clipboardMinChars || "20", 10))
 
     property var memos: []
     property bool loading: false
@@ -139,6 +141,110 @@ PluginComponent {
     }
 
     property bool sending: false
+    property bool promptOpen: false
+    property string lastClipSig: ""
+    property string clipTmp: "/tmp/dms-memos-clip"
+
+    function clipSig(s) {
+        let h = 0;
+        for (let i = 0; i < s.length; i++)
+            h = (h * 31 + s.charCodeAt(i)) | 0;
+        return h + ":" + s.length;
+    }
+
+    // dms notify -A/--wait prints the chosen action name on stdout; timeout exits 0 with nothing
+    function askSave(summary, details, onSave, imagePath) {
+        promptOpen = true;
+        // image-path hint is what actually renders a thumbnail; -i only sets the small icon
+        const hints = imagePath ? ["-h", "string:image-path:" + imagePath] : [];
+        Proc.runCommand(null, ["dms", "notify", "-a", "Memos", "-i", "sticky_note_2", "-t", "8000"].concat(hints).concat([
+            "-A", "save=Save to Memo", "-A", "skip=Dismiss", summary, details]), function (out, code) {
+            promptOpen = false;
+            if (String(out).trim() === "save")
+                onSave();
+        }, 0, 15000);
+    }
+
+    function checkClipboard() {
+        if (!clipboardPrompt || promptOpen || !configured)
+            return;
+        Proc.runCommand(null, ["wl-paste", "--list-types"], function (out, code) {
+            if (code !== 0 || promptOpen)
+                return;
+            const types = String(out).split("\n").map(t => t.trim());
+            const img = types.find(t => t.indexOf("image/") === 0);
+            if (img) {
+                clipboardImage(img);
+                return;
+            }
+            const textType = types.find(t => t.indexOf("text/plain") === 0) || (types.indexOf("UTF8_STRING") >= 0 ? "UTF8_STRING" : "");
+            if (textType)
+                clipboardText(textType);
+        }, 0, 5000);
+    }
+
+    function clipboardText(type) {
+        Proc.runCommand(null, ["wl-paste", "--no-newline", "-t", type], function (out, code) {
+            if (code !== 0)
+                return;
+            const text = String(out);
+            if (text.trim().length < clipboardMinChars)
+                return;
+            const sig = clipSig(text);
+            if (sig === lastClipSig)
+                return;
+            lastClipSig = sig;
+            askSave("New text copied", text.substring(0, 140).replace(/\s+/g, " "), () => root.createMemo(text));
+        }, 0, 5000);
+    }
+
+    // image bytes go through a temp file: one argv element cannot hold a big base64 payload
+    function clipboardImage(mime) {
+        Proc.runCommand(null, ["sh", "-c", "wl-paste -t '" + mime + "' > " + clipTmp + ".img"], function (out, code) {
+            if (code !== 0)
+                return;
+            Proc.runCommand(null, ["sh", "-c", "base64 -w0 " + clipTmp + ".img"], function (b64, bcode) {
+                if (bcode !== 0 || String(b64).length < 100)
+                    return;
+                const sig = clipSig(String(b64));
+                if (sig === lastClipSig)
+                    return;
+                lastClipSig = sig;
+                askSave("New image copied", mime, () => root.createImageMemo(mime, String(b64)), clipTmp + ".img");
+            }, 0, 20000);
+        }, 0, 20000);
+    }
+
+    function createImageMemo(mime, b64) {
+        const ext = (mime.split("/")[1] || "png").split("+")[0];
+        const name = "clipboard-" + Date.now() + "." + ext;
+        const py = "import base64,json;open('" + clipTmp + ".json','w').write(json.dumps({'filename':'" + name
+            + "','type':'" + mime + "','content':'" + b64 + "'}))";
+        Proc.runCommand(null, ["sh", "-c", "python3 -c \"" + py + "\""], function (out, code) {
+            if (code !== 0) {
+                ToastService.showError("Memo not saved", "temp file write failed");
+                return;
+            }
+            Proc.runCommand(null, ["curl", "-sS", "--max-time", "40", "-X", "POST",
+                "-H", "Authorization: Bearer " + token, "-H", "Content-Type: application/json",
+                "-d", "@" + clipTmp + ".json", baseUrl + "/api/attachments"], function (res, rc) {
+                if (rc !== 0) {
+                    ToastService.showError("Upload failed", "curl exit " + rc);
+                    return;
+                }
+                let att = null;
+                try {
+                    att = JSON.parse(res);
+                } catch (e) {}
+                if (!att || !att.name) {
+                    ToastService.showError("Upload failed", String(res).substring(0, 80));
+                    return;
+                }
+                const path = "/file/attachments/" + String(att.name).replace(/^attachments\//, "") + "/" + att.filename;
+                root.createMemo("![](" + path + ")");
+            }, 0, 45000);
+        }, 0, 10000);
+    }
 
     function createMemo(text) {
         const body = String(text || "").trim();
@@ -166,6 +272,8 @@ PluginComponent {
         if (!text)
             return;
         Quickshell.execDetached(["wl-copy", text]);
+        // our own copy must not trigger the save prompt
+        lastClipSig = clipSig(text);
         ToastService.showInfo("Memo copied");
         root.closePopout();
     }
@@ -186,6 +294,14 @@ PluginComponent {
         running: true
         repeat: false
         onTriggered: root.refresh()
+    }
+
+    // clipboard watcher: prompt to save anything newly copied
+    Timer {
+        interval: 1500
+        running: root.clipboardPrompt && root.configured
+        repeat: true
+        onTriggered: root.checkClipboard()
     }
 
     Timer {
@@ -269,7 +385,7 @@ PluginComponent {
 
                     DTextField {
                         id: draftField
-                        width: parent.width - addButton.width - Theme.spacingS
+                        width: parent.width - addButton.width - refreshButton.width - Theme.spacingS * 2
                         placeholderText: "New memo…"
                         onAccepted: root.createMemo(draftField.text)
                     }
@@ -279,6 +395,14 @@ PluginComponent {
                         text: root.sending ? "…" : "Add"
                         enabled: !root.sending && draftField.text.trim().length > 0 && root.configured
                         onClicked: root.createMemo(draftField.text)
+                    }
+
+                    DButton {
+                        id: refreshButton
+                        iconName: "refresh"
+                        text: ""
+                        enabled: root.configured && !root.loading
+                        onClicked: root.refresh()
                     }
                 }
 

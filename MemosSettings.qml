@@ -57,6 +57,21 @@ PluginSettings {
     }
 
     ToggleSetting {
+        settingKey: "clipboardPrompt"
+        label: "Prompt to save new clipboard text/images"
+        description: "Notification with a Save button whenever something new is copied"
+        defaultValue: true
+    }
+
+    StringSetting {
+        settingKey: "clipboardMinChars"
+        description: "Ignore copied text shorter than this"
+        label: "Clipboard minimum length"
+        placeholder: "20"
+        defaultValue: "20"
+    }
+
+    ToggleSetting {
         settingKey: "showSnippet"
         label: "Show latest memo text in the bar"
         description: "Off: show the memo count instead"
